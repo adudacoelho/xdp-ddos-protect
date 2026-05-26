@@ -7,10 +7,13 @@ MAP ?= rate_limit_map
 all: detach clean compile attach dump
 
 compile: clean
+# 	clang -O2 -g -Wall -target bpf \
+# 	-I/usr/include/x86_64-linux-gnu \
+# 	-c $(PROG).c -o $(PROG).o
 	clang -O2 -g -target bpf -c $(PROG).c -o $(PROG).o
-
 clean:
 	rm -f xdp_ddos_protection.o
+# 	rm -f $(PROG).o
 
 attach:
 	sudo ip link set dev $(IFACE) xdp obj $(PROG).o sec xdp
