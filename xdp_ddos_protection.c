@@ -1,128 +1,121 @@
 #include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
-#include <bpf/bpf_helpers.h>
 
-#define THRESHOLD 250 // Max packets per second
-#define TIME_WINDOW_NS 1000000000 // 1 second in nanoseconds
+#define IPPROTO_ICMP 1
+#define ICMP_ECHO 8
 
-struct rate_limit_entry {
-    __u64 last_update; // Timestamp of the last update
-    __u32 packet_count; // Packet count within the time window
+struct icmphdr {
+    __u8 type;
+    __u8 code;
+    __u16 checksum;
 };
 
-// Hash map to track rate limits for each source IP
+#define RATE_LIMIT 3
+
+struct rate_limit_entry {
+    __u64 last_update;
+    __u32 packet_count;
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
-    __type(key, __u32); // Source IP
+    __type(key, __u32);
     __type(value, struct rate_limit_entry);
 } rate_limit_map SEC(".maps");
 
-// Dynamic blacklist
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
     __type(key, __u32);
     __type(value, __u8);
 } blacklist_map SEC(".maps");
-
-// Stats structure
-struct stats {
-    __u64 dropped_packets;
-    __u64 blacklisted_packets;
-};
-
-// Stats map
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, struct stats);
-} stats_map SEC(".maps");
-
-SEC("xdp") int ddos_protection(struct xdp_md *ctx) {
-    void *data_end = (void *)(long)ctx->data_end;
+SEC("xdp")
+int xdp_prog(struct xdp_md *ctx)
+{
     void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
 
-    // Parse Ethernet header
+    // Ethernet
     struct ethhdr *eth = data;
-    // Check if packet is large enough to contain Ethernet header
+
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
-    
-    // Check for IP packets
-    if (eth->h_proto != __constant_htons(ETH_P_IP))
-        return XDP_PASS;
-    
-    // Parse IP header
-    struct iphdr *iph = (void *)(eth + 1);
-    // Check if ethernet frame is large enough to contain IP header
-    if ((void *)(iph + 1) > data_end)
-        return XDP_PASS;
-        
-    // Convert source IP from network to host byte order
-    __u32 src_ip = __builtin_bswap32(iph->saddr);
 
-    // =========================
-    // CHECK BLACKLIST
-    // =========================
+    // Apenas IPv4
+    if (eth->h_proto != __bpf_htons(ETH_P_IP))
+        return XDP_PASS;
 
+    // IP Header
+    struct iphdr *ip = data + sizeof(*eth);
+
+    if ((void *)(ip + 1) > data_end)
+        return XDP_PASS;
+
+    // Apenas ICMP
+    if (ip->protocol != IPPROTO_ICMP)
+        return XDP_PASS;
+
+    // ICMP Header
+    struct icmphdr *icmp = (void *)ip + sizeof(*ip);
+
+    if ((void *)(icmp + 1) > data_end)
+        return XDP_PASS;
+
+    // Apenas ping request
+if (icmp->type != ICMP_ECHO)
+        return XDP_PASS;
+
+    __u32 src_ip = ip->saddr;
+
+    // Verifica blacklist
     __u8 *blocked = bpf_map_lookup_elem(&blacklist_map, &src_ip);
 
-    if (blocked) {
-        __u32 key = 0;
-        struct stats *s = bpf_map_lookup_elem(&stats_map, &key);
-
-        if (s)
-            s->blacklisted_packets++;
-
+    if (blocked)
         return XDP_DROP;
-    }
 
-    // =========================
-    // RATE LIMITING
-    // =========================
-    
-    // Lookup rate limit entry for this IP
-    struct rate_limit_entry *entry = bpf_map_lookup_elem(&rate_limit_map, &src_ip);
-    
-    // Get current time in nanoseconds
-    __u64 current_time = bpf_ktime_get_ns();
-    
+    // Procura entrada
+    struct rate_limit_entry *entry;
+
+    entry = bpf_map_lookup_elem(&rate_limit_map, &src_ip);
+
     if (entry) {
-        // Check if we're in the same time window
-        if (current_time - entry->last_update < TIME_WINDOW_NS) {
-            entry->packet_count++;
-            if (entry->packet_count > THRESHOLD) {
 
-                __u32 key = 0;
-                struct stats *s =
-                    bpf_map_lookup_elem(&stats_map, &key);
+        entry->packet_count++;
 
-                if (s)
-                    s->dropped_packets++;
+        if (entry->packet_count > RATE_LIMIT) {
 
-                return XDP_DROP;
-            }
+            __u8 flag = 1;
 
-        } else {
-            // New time window, reset counter
-            entry->last_update = current_time;
-            entry->packet_count = 1;
+            bpf_map_update_elem(
+                &blacklist_map,
+                &src_ip,
+                &flag,
+                BPF_ANY
+            );
+
+             return XDP_DROP;
         }
+
     } else {
-        // Initialize rate limit entry for new IP
-        struct rate_limit_entry new_entry;
-        // Zero out padding bytes
-        __builtin_memset(&new_entry, 0, sizeof(new_entry));
-        new_entry.last_update = current_time;
-        new_entry.packet_count = 1;
-        if (bpf_map_update_elem(&rate_limit_map, &src_ip, &new_entry, BPF_ANY) != 0) {
-            return XDP_ABORTED; // Handle error if update fails
-        }
+
+        struct rate_limit_entry new_entry = {
+            .last_update = 0,
+            .packet_count = 1
+        };
+
+        bpf_map_update_elem(
+            &rate_limit_map,
+            &src_ip,
+            &new_entry,
+            BPF_ANY
+        );
     }
-    return XDP_PASS; // Allow packet if under threshold   
+
+    return XDP_PASS;
 }
 
-char _license[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "GPL";
