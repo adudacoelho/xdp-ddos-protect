@@ -2,7 +2,7 @@ IFACE ?= lo
 PROG ?= xdp_ddos_protection
 MAP ?= rate_limit_map
 
-.PHONY: all compile clean attach detach dump update-branch iface-inspect
+.PHONY: all compile clean attach detach dump iface-inspect
 
 all: detach clean compile attach dump
 
@@ -26,6 +26,3 @@ iface-inspect:
 
 dump:
 	sudo bpftool map dump name $(MAP) &> /dev/null
-
-update-branch:
-	git push origin $$(git branch --show-current)
