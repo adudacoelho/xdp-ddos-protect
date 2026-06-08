@@ -1,0 +1,38 @@
+name: xdp-ddos
+
+topology:
+  kinds:
+    linux:
+      image: ubuntu:22.04
+
+  nodes:
+    vitima:
+      kind: linux
+      image: xdp-vitima
+
+    atacante1:
+      kind: linux
+      env:
+        MTU: "1500"
+    atacante2:
+      kind: linux
+      env:
+        MTU: "1500"
+    atacante3:
+      kind: linux
+      env:
+        MTU: "1500"
+    atacante4:
+      kind: linux
+      env:
+        MTU: "1500"
+
+  links:
+    - endpoints: ["atacante1:eth1", "vitima:eth1"]
+      mtu: 1500
+    - endpoints: ["atacante2:eth1", "vitima:eth2"]
+      mtu: 1500
+    - endpoints: ["atacante3:eth1", "vitima:eth3"]
+      mtu: 1500
+    - endpoints: ["atacante4:eth1", "vitima:eth4"]
+      mtu: 1500
